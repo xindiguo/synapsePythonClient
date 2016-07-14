@@ -8,7 +8,7 @@ from __future__ import unicode_literals
 
 from datetime import datetime as Datetime
 from nose.tools import assert_raises
-import os
+import os, sys
 
 import synapseclient.utils as utils
 from synapseclient.activity import Activity
@@ -276,8 +276,12 @@ def test_is_json():
     assert not utils._is_json('')
 
 def test_unicode_output():
-    print("\n")
-    print("ȧƈƈḗƞŧḗḓ uʍop-ǝpısdn ŧḗẋŧ ƒǿř ŧḗşŧīƞɠ")
+    encoding = sys.stdout.encoding if hasattr(sys.stdout, 'encoding') else 'no encoding'
+    print("\nPython thinks your character encoding is:", encoding)
+    if encoding and encoding.lower() in ['utf-8', 'utf-16']:
+        print("ȧƈƈḗƞŧḗḓ uʍop-ǝpısdn ŧḗẋŧ ƒǿř ŧḗşŧīƞɠ")
+    else:
+        print("can't display unicode, skipping test_unicode_output...")
 
 def test_normalize_whitespace():
     assert "zip tang pow a = 2" == utils.normalize_whitespace("   zip\ttang   pow   \n    a = 2   ")
@@ -365,4 +369,13 @@ def test_raise_for_status():
             body="body"))
 
     assert_raises(SynapseHTTPError, _raise_for_status, response, verbose=False)
+
+
+def test_treadsafe_generator():
+    @utils.threadsafe_generator
+    def generate_letters():
+        for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            yield c
+
+    "".join(letter for letter in generate_letters()) == "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 

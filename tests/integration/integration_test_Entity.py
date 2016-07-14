@@ -10,10 +10,15 @@ from datetime import datetime as Datetime
 from nose.tools import assert_raises
 from nose.plugins.attrib import attr
 from mock import patch
+try:
+    import configparser
+except ImportError:
+    import ConfigParser as configparser
 
+import synapseclient
 import synapseclient.client as client
 import synapseclient.utils as utils
-from synapseclient import Activity, Entity, Project, Folder, File, Link
+from synapseclient import Activity, Entity, Project, Folder, File, Link, Column, Schema, RowSet, Row
 from synapseclient.exceptions import *
 
 import integration
@@ -27,6 +32,22 @@ def setup(module):
     print('~' * 60)
     module.syn = integration.syn
     module.project = integration.project
+
+    # Some of these tests require a second user
+    config = configparser.ConfigParser()
+    config.read(synapseclient.client.CONFIG_FILE)
+    module.other_user = {}
+    try:
+        other_user['username'] = config.get('test-authentication', 'username')
+        other_user['password'] = config.get('test-authentication', 'password')
+        other_user['principalId'] = config.get('test-authentication', 'principalId')
+    except configparser.Error:
+        print("[test-authentication] section missing from the configuration file")
+
+    if 'principalId' not in other_user:
+        # Fall back on the synapse-test user
+        other_user['principalId'] = 1560252
+        other_user['username'] = 'synapse-test'
 
 
 def test_Entity():
@@ -82,7 +103,11 @@ def test_Entity():
     a_file = syn.downloadEntity(a_file)
     assert filecmp.cmp(path, a_file.path)
 
+    assert_raises(ValueError,File,a_file.path,parent=folder,dataFileHandleId=56456)
+    b_file = File(name="blah",parent=folder,dataFileHandleId=a_file.dataFileHandleId)
+    b_file = syn.store(b_file)
 
+    assert b_file.dataFileHandleId == a_file.dataFileHandleId
     # Update the File
     a_file.path = path
     a_file['foo'] = 'Another arbitrary chunk of text data'
@@ -104,15 +129,15 @@ def test_Entity():
     assert link['linksTo']['targetVersionNumber'] == a_file.versionNumber
     assert link['linksToClassName'] == a_file['concreteType']
     
-    testLink = syn.get(link, followLink= False)
+    testLink = syn.get(link)
     assert testLink == link
 
-    link = syn.getEntity(link)
+    link = syn.get(link,followLink= True)
     assert link['foo'][0] == 'Another arbitrary chunk of text data'
     assert link['bar'] == [33,44,55]
     assert link['bday'][0] == Datetime(2013,3,15)
     assert link.new_key[0] == 'A newly created value'
-    assert link.path == path
+    assert utils.equal_paths(link.path, path)
     assert link.versionNumber == 1, "unexpected version number: " +  str(a_file.versionNumber)
 
     # Upload a new File and verify
@@ -139,6 +164,11 @@ def test_Entity():
     syn.cache.remove(a_file.dataFileHandleId, delete=True)
     a_file_retreived = syn.get(a_file, downloadLocation=tmpdir)
     assert os.path.basename(a_file_retreived.path) == a_file.fileNameOverride, os.path.basename(a_file_retreived.path)
+
+    ## test getting the file from the cache with downloadLocation parameter (SYNPY-330)
+    a_file_cached = syn.get(a_file.id, downloadLocation=tmpdir)
+    assert a_file_cached.path is not None
+    assert os.path.basename(a_file_cached.path) == a_file.fileNameOverride, a_file_cached.path
 
     print("\n\nList of files in project:\n")
     syn._list(project, recursive=True)
@@ -363,6 +393,13 @@ def test_ExternalFileHandle():
     assert singapore.path is not None
     assert singapore.externalURL == singapore_url
     assert os.path.exists(singapore.path)
+
+    # Update external URL
+    singapore_2_url = 'https://upload.wikimedia.org/wikipedia/commons/a/a2/Singapore_Panorama_v2.jpg'
+    singapore.externalURL = singapore_2_url
+    singapore = syn.store(singapore)
+    s2 = syn.get(singapore, downloadFile=False)
+    assert s2.externalURL == singapore_2_url
 
 
 def test_synapseStore_flag():

@@ -521,13 +521,14 @@ class File(Entity, Versionable):
     When a File object is stored, the associated local file or its URL will be
     stored in Synapse. A File must have a path (or URL) and a parent.
 
-    :param path:         Location to be represented by this File
-    :param name:         Name of the file in Synapse, not to be confused with the name within the path
-    :param parent:       Project or Folder where this File is stored
-    :param synapseStore: Whether the File should be uploaded or if only the path should be stored.
-                         Defaults to True (file should be uploaded)
-    :param contentType:  Manually specify Content-type header, for example "application/png" or "application/json; charset=UTF-8"
-
+    :param path:             Location to be represented by this File
+    :param name:             Name of the file in Synapse, not to be confused with the name within the path
+    :param parent:           Project or Folder where this File is stored
+    :param synapseStore:     Whether the File should be uploaded or if only the path should be stored.
+                             Defaults to True (file should be uploaded)
+    :param contentType:      Manually specify Content-type header, for example "application/png" or "application/json; charset=UTF-8"
+    :param dataFileHandleId: Defining an existing dataFileHandleId will use the existing dataFileHandleId
+                             The creator of the file must also be the owner of the dataFileHandleId to have permission to store the file
     ::
 
         data = File('/path/to/file/data.xyz', parent=folder)
@@ -543,6 +544,8 @@ class File(Entity, Versionable):
                  annotations=None, local_state=None, **kwargs):
         if path and 'name' not in kwargs:
             kwargs['name'] = utils.guess_file_name(path)
+        if path and 'dataFileHandleId' in kwargs:
+            raise ValueError('Please only specify path or dataFileHandleId')
         self.__dict__['path'] = path
         if path:
             cacheDir, basename = os.path.split(path)
@@ -640,10 +643,15 @@ def is_container(entity):
     """Test if an entity is a container (ie, a Project or a Folder)"""
     if 'concreteType' in entity:
         concreteType = entity['concreteType']
-    elif 'entity.concreteType' in entity:
-        concreteType = entity['entity.concreteType'][0]
-    elif 'entity.nodeType' in entity:
-        return entity['entity.nodeType'] in [2,4] or entity['entity.nodeType'] in ['project', 'folder']
+    elif isinstance(entity, collections.Mapping):
+        prefix = utils.extract_prefix(entity.keys())
+        if prefix+'concreteType' in entity:
+            concreteType = entity[prefix+'concreteType'][0]
+        elif prefix+'nodeType' in entity:
+            return entity[prefix+'nodeType'] in ['project', 'folder']
+        else:
+            return False
     else:
         return False
     return concreteType in (Project._synapse_entity_type, Folder._synapse_entity_type)
+

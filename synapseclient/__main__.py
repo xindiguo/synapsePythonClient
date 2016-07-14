@@ -43,7 +43,6 @@ Commands
   * **add**              - add or modify content to Synapse
   * **delete**           - removes a dataset from Synapse
   * **mv**               - move a dataset in Synapse
-  * **cp**               - copy a dataset in Synapse
   * **query**            - performs SQL like queries on Synapse
   * **submit**           - submit an entity for evaluation
   * **set-provenance**   - create provenance records
@@ -121,7 +120,7 @@ def _recursiveGet(id, path, syn):
     """Traverses a heirarchy and download files and create subfolders as necessary."""
     from synapseclient.entity import is_container
 
-    results = syn.chunkedQuery("select id, name, concreteType from entity where entity.parentId=='%s'" %id)
+    results = syn.chunkedQuery("select id, name, nodeType from entity where entity.parentId=='%s'" %id)
     for result in results:
         if is_container(result):
             new_path = os.path.join(path, result['entity.name'])
@@ -140,13 +139,13 @@ def get(args, syn):
     if args.recursive:
         if args.version is not None:
             raise ValueError('You cannot specify a version making a recursive download.')
-        _recursiveGet(args.id, '.', syn)  #Todo should be updated with destination folder instead of '.'
+        _recursiveGet(args.id, args.downloadLocation, syn)  #Todo should be updated with destination folder instead of '.'
     elif args.queryString is not None:
         if args.version is not None or args.id is not None:
             raise ValueError('You cannot specify a version or id when you are dowloading a query.')
         ids = _getIdsFromQuery(args.queryString, syn)
         for id in ids:
-            syn.get(id, downloadLocation='.')
+            syn.get(id, downloadLocation=args.downloadLocation)
     else:
         ## search by MD5
         if isinstance(args.id, six.string_types) and os.path.isfile(args.id):
@@ -155,13 +154,15 @@ def get(args, syn):
                 print("Associated file: %s with synapse ID %s" % (entity.path, entity.id))
         ## normal syn.get operation
         else:
-            entity = syn.get(args.id, version=args.version, downloadLocation='.')
+            entity = syn.get(args.id, version=args.version, # limitSearch=args.limitSearch,
+                             downloadLocation=args.downloadLocation)
             if "path" in entity and entity.path is not None and os.path.exists(entity.path):
                 print("Downloaded file: %s" % os.path.basename(entity.path))
             else:
                 print('WARNING: No files associated with entity %s\n' % entity.id)
                 print(entity)
 
+        print('Creating %s' % entity.path)
 
 def store(args, syn):
     #If we are storing a fileEntity we need to have id or parentId
@@ -176,7 +177,7 @@ def store(args, syn):
     if args.id is not None:
         entity = syn.get(args.id, downloadFile=False)
     else:
-        entity = {'concreteType': 'org.sagebionetworks.repo.model.%s' % args.type, 
+        entity = {'concreteType': 'org.sagebionetworks.repo.model.%s' % args.type,
                   'name': utils.guess_file_name(args.file) if args.file and not args.name else None,
                   'parentId' : None,
                   'description' : None,
@@ -208,25 +209,8 @@ def move(args, syn):
     ent = syn.store(ent, forceVersion=False)
     print('Moved %s to %s' %(ent.id, ent.parentId))
 
-def copy(args,syn):
-    """Copys an entity specifed by args.id to args.parentId"""
-    ent = syn.get(args.id)
-    #CHECK: must be a file entity
-    if ent.entityType!='org.sagebionetworks.repo.model.FileEntity':
-        raise ValueError('"synapse cp" can only copy files!')
-    #CHECK: If file is in the same parent directory (throw an error)
-    search = syn.query('select name from file where parentId =="%s"'%args.parentid)['results']
-    for i in search:
-        if i['file.name'] == ent.name:
-            raise ValueError('Filename exists in directory you would like to copy to, either rename or check if file has already been copied!')
-    new_ent = synapseclient.File(ent['path'],parent=args.parentid)
-    ent_annot = ent.annotations
-    annot = dict((key,ent_annot[key]) for key in ent_annot if key not in ('uri','id','creationDate','etag'))
-    new_ent.annotations = annot
-    new_ent = syn.store(new_ent,used = args.id, activityName = "Copied File")
-    print('Copied %s to %s' %(ent.id, new_ent.id))
-
 def associate(args, syn):
+    files = []
     if args.r:
         files = [os.path.join(dp, f) for dp, dn, filenames in
                  os.walk(args.path) for f in filenames]
@@ -254,7 +238,7 @@ def cat(args, syn):
         ## SIGILL, SIGINT, SIGSEGV, or SIGTERM. A ValueError will be raised
         ## in any other case."
         pass
-    entity = syn.get(args.id)
+    entity = syn.get(args.id, version=args.version)
     if 'files' in entity:
         for filepath in entity['files']:
             with open(os.path.join(entity['cacheDir'], filepath)) as inputfile:
@@ -282,7 +266,7 @@ def show(args, syn):
 
 def delete(args, syn):
 	if args.version:
-	    syn.delete(args.id, args.version)	
+	    syn.delete(args.id, args.version)
 	    print('Deleted entity %s, version %s' % (args.id, args.version))
 	else:
 	    syn.delete(args.id)
@@ -341,7 +325,7 @@ def getProvenance(args, syn):
     activity = syn.getProvenance(args.id, args.version)
 
     if args.output is None or args.output=='STDOUT':
-        print(json.dumps(activity, sort_keys=True, indent=2, ensure_ascii=False))
+        print(json.dumps(activity, sort_keys=True, indent=2))
     else:
         with open(args.output, 'w') as f:
             f.write(json.dumps(activity))
@@ -360,11 +344,11 @@ def setAnnotations(args, syn):
     try:
         newannots = json.loads(args.annotations)
     except Exception as e:
-        sys.stderr.write("Please check that your JSON string is properly formed and evaluates to a dictionary (key/value pairs). For example, to set an annotations called 'foo' to the value 1, the format should be '{\"foo\": 1}'.")
+        sys.stderr.write("Please check that your JSON string is properly formed and evaluates to a dictionary (key/value pairs). For example, to set an annotations called 'foo' to the value 1, the format should be '{\"foo\": 1, \"bar\":\"quux\"}'.")
         raise e
 
     if type(newannots) is not dict:
-        raise TypeError("Please check that your JSON string is properly formed and evaluates to a dictionary (key/value pairs). For example, to set an annotations called 'foo' to the value 1, the format should be '{\"foo\": 1}'.")
+        raise TypeError("Please check that your JSON string is properly formed and evaluates to a dictionary (key/value pairs). For example, to set an annotations called 'foo' to the value 1, the format should be '{\"foo\": 1, \"bar\":\"quux\"}'.")
 
     entity = syn.get(args.id, downloadFile=False)
 
@@ -382,7 +366,7 @@ def getAnnotations(args, syn):
     annotations = syn.getAnnotations(args.id)
 
     if args.output is None or args.output=='STDOUT':
-        print(json.dumps(annotations, sort_keys=True, indent=2, ensure_ascii=False))
+        print(json.dumps(annotations, sort_keys=True, indent=2))
     else:
         with open(args.output, 'w') as f:
             f.write(json.dumps(annotations))
@@ -446,7 +430,7 @@ def test_encoding(args, syn):
     import locale
     import platform
     print("python version =               ", platform.python_version())
-    print("sys.stdout.encoding =          ", sys.stdout.encoding)
+    print("sys.stdout.encoding =          ", sys.stdout.encoding if hasattr(sys.stdout, 'encoding') else 'no encoding attribute')
     print("sys.stdout.isatty() =          ", sys.stdout.isatty())
     print("locale.getpreferredencoding() =", locale.getpreferredencoding())
     print("sys.getfilesystemencoding() =  ", sys.getfilesystemencoding())
@@ -483,6 +467,8 @@ def build_parser():
             help='Fetches content in Synapse recursively contained in the parentId specified by id.')
     parser_get.add_argument('--limitSearch', metavar='projId', type=str,
             help='Synapse ID of a container such as project or folder to limit search for files if using a path.')
+    parser_get.add_argument('--downloadLocation', metavar='path', type=str, default="./",
+            help='Directory to download file to [default: %(default)s].')
     parser_get.add_argument('id',  metavar='syn123', nargs='?', type=str,
             help='Synapse ID of form syn123 of desired data object.')
     parser_get.set_defaults(func=get)
@@ -510,7 +496,7 @@ def build_parser():
             help='Synapse ID of a container such as project or folder to limit search for provenance files.')
 
     parser_store.add_argument('--annotations', metavar='ANNOTATIONS', type=str, required=False, default=None,
-            help="Annotations to add as a JSON formatted string, should evaluate to a dictionary (key/value pairs). Example: '{\"foo\": 1}'")
+            help="Annotations to add as a JSON formatted string, should evaluate to a dictionary (key/value pairs). Example: '{\"foo\": 1, \"bar\":\"quux\"}'")
     parser_store.add_argument('--replace', action='store_true',default=False,
             help='Replace all existing annotations with the given annotations')
 
@@ -555,13 +541,20 @@ def build_parser():
             help='Synapse ID of project or folder where file/folder will be moved ')
     parser_mv.set_defaults(func=move)
 
-    parser_cp = subparsers.add_parser('cp',
-            help='Copies a file in Synapse')
-    parser_cp.add_argument('--id', metavar='syn123', type=str, required=True,
-            help='Id of entity in Synapse to be copied.')
-    parser_cp.add_argument('--parentid', '--parentId', '-parentid', '-parentId', metavar='syn123', type=str, required=True, dest='parentid',
-            help='Synapse ID of project or folder where file will be moved ')
-    parser_cp.set_defaults(func=copy)
+    # parser_cp = subparsers.add_parser('cp',
+    #         help='Copies a file in Synapse')
+    # parser_cp.add_argument('--id', metavar='syn123', type=str, required=True,
+    #         help='Id of entity in Synapse to be copied.')
+    # parser_cp.add_argument('--parentid', '--parentId', '-parentid', '-parentId', metavar='syn123', type=str, required=True, dest='parentid',
+    #         help='Synapse ID of project or folder where file will be moved ')
+    # parser_cp.add_argument('-v', '--version', metavar='VERSION', type=int, default=None,
+    #         help='Synapse version number of entity to retrieve. Defaults to most recent version.')
+    # parser_cp.add_argument('--setProvenance', metavar='MODE', type=str, default='traceback',
+    #         help=('Has three values to set the provenance of the copied entity-'
+    #                     'traceback: Sets to the source entity'
+    #                     'existing: Sets to source entity\'s original provenance (if it exists)'
+    #                     'None/none: No provenance is set'))
+    # parser_cp.set_defaults(func=copy)
 
     parser_associate = subparsers.add_parser('associate',
             help=('Associate local files with the files stored in Synapse so that calls to '
@@ -632,6 +625,8 @@ def build_parser():
     parser_cat = subparsers.add_parser('cat', help='prints a dataset from Synapse')
     parser_cat.add_argument('id', metavar='syn123', type=str,
             help='Synapse ID of form syn123 of desired data object')
+    parser_cat.add_argument('-v', '--version', metavar='VERSION', type=int, default=None,
+            help='Synapse version number of entity to display. Defaults to most recent version.')
     parser_cat.set_defaults(func=cat)
 
     parser_list = subparsers.add_parser('list',
@@ -685,7 +680,7 @@ def build_parser():
     parser_set_annotations.add_argument("--id", metavar='syn123', type=str, required=True,
             help='Synapse ID of entity whose annotations we are accessing.')
     parser_set_annotations.add_argument('--annotations', metavar='ANNOTATIONS', type=str, required=True,
-            help="Annotations to add as a JSON formatted string, should evaluate to a dictionary (key/value pairs). Example: '{\"foo\": 1}'")
+            help="Annotations to add as a JSON formatted string, should evaluate to a dictionary (key/value pairs). Example: '{\"foo\": 1, \"bar\":\"quux\"}'")
     parser_set_annotations.add_argument('-r', '--replace', action='store_true',default=False,
             help='Replace all existing annotations with the given annotations')
     parser_set_annotations.set_defaults(func=setAnnotations)

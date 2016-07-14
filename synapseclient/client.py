@@ -57,11 +57,6 @@ except ImportError:
     from urllib import quote
     from urllib import unquote
 
-try:
-    import urllib.request, urllib.parse, urllib.error
-except ImportError:
-    import urllib
-
 import requests, webbrowser
 import shutil
 import zipfile
@@ -84,7 +79,7 @@ from .activity import Activity
 from .entity import Entity, File, Project, Folder, Link, Versionable, split_entity_namespaces, is_versionable, is_container, is_synapse_entity
 from .dict_object import DictObject
 from .evaluation import Evaluation, Submission, SubmissionStatus
-from .table import Schema, Column, RowSet, Row, TableQueryResult, CsvFileTable
+from .table import Schema, Table, Column, RowSet, Row, TableQueryResult, CsvFileTable
 from .team import UserProfile, Team, TeamMember, UserGroupHeader
 from .wiki import Wiki, WikiAttachment
 from .retry import _with_retry
@@ -103,7 +98,7 @@ STAGING_ENDPOINTS    = {'repoEndpoint':'https://repo-staging.prod.sagebase.org/r
 
 CONFIG_FILE = os.path.join(os.path.expanduser('~'), '.synapseConfig')
 SESSION_FILENAME = '.session'
-FILE_BUFFER_SIZE = 4*KB
+FILE_BUFFER_SIZE = 2*MB
 CHUNK_SIZE = 5*MB
 QUERY_LIMIT = 1000
 CHUNK_UPLOAD_POLL_INTERVAL = 1 # second
@@ -140,7 +135,7 @@ mimetypes.add_type('text/x-markdown', '.markdown', strict=False)
 
 def login(*args, **kwargs):
     """
-    Convience method to create a Synapse object and login.
+    Convenience method to create a Synapse object and login.
 
     See :py:func:`synapseclient.Synapse.login` for arguments and usage.
 
@@ -314,7 +309,7 @@ class Synapse:
         :param rememberMe: Whether the authentication information should be cached locally
                            for usage across sessions and clients.
         :param silent:     Defaults to False.  Suppresses the "Welcome ...!" message.
-        :param forced:     Defaults to False.  Bypass the credential cache if set. 
+        :param forced:     Defaults to False.  Bypass the credential cache if set.
 
         Example::
 
@@ -551,7 +546,7 @@ class Synapse:
             ## if id is unset or a userID, this will succeed
             id = '' if id is None else int(id)
         except (TypeError, ValueError):
-            if 'ownerId' in id:
+            if isinstance(id, collections.Mapping) and 'ownerId' in id:
                 id = id.ownerId
             elif isinstance(id, TeamMember):
                 id = id.member.ownerId
@@ -589,7 +584,10 @@ class Synapse:
              {u'displayName': ... }]
 
         """
-        uri = '/userGroupHeaders?prefix=%s' % query_string
+        ## In Python2, urllib.quote expects encoded byte-strings
+        if six.PY2 and isinstance(query_string, unicode) or isinstance(query_string, str):
+            query_string = query_string.encode('utf-8')
+        uri = '/userGroupHeaders?prefix=%s' % quote(query_string)
         return [UserGroupHeader(**result) for result in self._GET_paginated(uri)]
 
 
@@ -607,13 +605,13 @@ class Synapse:
             webbrowser.open("%s#!Wiki:%s/ENTITY/%s" % (self.portalEndpoint, id_of(entity), subpageId))
 
 
-    def printEntity(self, entity):
+    def printEntity(self, entity, ensure_ascii=True):
         """Pretty prints an Entity."""
 
         if utils.is_synapse_id(entity):
             entity = self._getEntity(entity)
         try:
-            print(json.dumps(entity, sort_keys=True, indent=2, ensure_ascii=False))
+            print(json.dumps(entity, sort_keys=True, indent=2, ensure_ascii=ensure_ascii))
         except TypeError:
             print(str(entity))
 
@@ -637,7 +635,7 @@ class Synapse:
         :param downloadLocation: Directory where to download the Synapse File Entity.
                                  Defaults to the local cache.
         :param followLink:       Whether the link returns the target Entity.
-                                 Defaults to True
+                                 Defaults to False
         :param ifcollision:      Determines how to handle file collisions.
                                  May be "overwrite.local", "keep.local", or "keep.both".
                                  Defaults to "keep.both".
@@ -669,8 +667,11 @@ class Synapse:
         #If entity is a local file determine the corresponding synapse entity
         if isinstance(entity, six.string_types) and os.path.isfile(entity):
             bundle = self.__getFromFile(entity, kwargs.get('limitSearch', None))
+            # bundle['path'] = entity
+            # kwargs['downloadFile']=False
             kwargs['downloadFile'] = False
             kwargs['path'] = entity
+
         elif isinstance(entity, six.string_types) and not utils.is_synapse_id(entity):
             raise SynapseFileNotFoundError(('The parameter %s is neither a local file path '
                                             ' or a valid entity id' %entity))
@@ -687,7 +688,6 @@ class Synapse:
             if kwargs.get('downloadFile', True):
                 raise SynapseUnmetAccessRestrictions(warning_message)
             warnings.warn(warning_message)
-
         return self._getWithEntityBundle(entityBundle=bundle, entity=entity, **kwargs)
 
 
@@ -717,8 +717,13 @@ class Synapse:
                              'Will use the first one returned: \n'
                              '%s version %i\n' %(filepath,  id_txts, results[0]['id'], results[0]['versionNumber']))
         entity = results[0]
+
+        # bundle = self._getEntityBundle(entity)
+        # cache.add_local_file_to_cache(path = filepath, **bundle['entity'])
+
         bundle = self._getEntityBundle(entity, version=entity['versionNumber'])
         self.cache.add(file_handle_id=bundle['entity']['dataFileHandleId'], path=filepath)
+
         return bundle
 
 
@@ -743,12 +748,11 @@ class Synapse:
         downloadLocation = kwargs.get('downloadLocation', None)
         ifcollision = kwargs.get('ifcollision', 'keep.both')
         submission = kwargs.get('submission', None)
-        followLink = kwargs.get('followLink',True)
-
+        followLink = kwargs.get('followLink',False)
         #If Link, get target ID entity bundle
         if entityBundle['entity']['concreteType'] == 'org.sagebionetworks.repo.model.Link' and followLink:
             targetId = entityBundle['entity']['linksTo']['targetId']
-            targetVersion = entityBundle['entity']['linksTo']['targetVersionNumber']
+            targetVersion = entityBundle['entity']['linksTo'].get('targetVersionNumber')
             entityBundle = self._getEntityBundle(targetId, targetVersion)
 
         ## TODO is it an error to specify both downloadFile=False and downloadLocation?
@@ -794,7 +798,7 @@ class Synapse:
 
             # Determine if the file should be downloaded
             # downloadPath = None if downloadLocation is None else os.path.join(downloadLocation, fileName)
-            # if downloadFile: 
+            # if downloadFile:
             #     downloadFile = cache.local_file_has_changed(entityBundle, True, downloadPath)
             # # Determine where the file should be downloaded to
             # if downloadFile:
@@ -829,12 +833,15 @@ class Synapse:
                             entity.cacheDir = None
                         else:
                             ## TODO apply ifcollision here
-                            downloadPath = utils.normalize_path(os.path.join(downloadLocation, os.path.basename(cached_file_path)))
                             shutil.copy(cached_file_path, downloadPath)
 
                             entity.path = downloadPath
                             entity.files = [os.path.basename(downloadPath)]
                             entity.cacheDir = downloadLocation
+                    else:
+                        entity.path = downloadPath
+                        entity.files = [os.path.basename(downloadPath)]
+                        entity.cacheDir = downloadLocation
 
             elif downloadFile:
 
@@ -971,12 +978,14 @@ class Synapse:
                 # Check if the file should be uploaded
                 fileHandle = find_data_file_handle(bundle)
                 if fileHandle and fileHandle['concreteType'] == "org.sagebionetworks.repo.model.file.ExternalFileHandle":
-                    needs_upload = False
+                    needs_upload = (fileHandle['externalURL'] != entity['externalURL'])
                 else:
                     ## Check if we need to upload a new version of an existing
                     ## file. If the file referred to by entity['path'] has been
                     ## modified, we want to upload the new version.
                     needs_upload = not self.cache.contains(bundle['entity']['dataFileHandleId'], entity['path'])
+            elif entity.get('dataFileHandleId',None) is not None:
+                needs_upload = False
             else:
                 needs_upload = True
 
@@ -1125,15 +1134,16 @@ class Synapse:
 
         return bundle
 
+
     def delete(self, obj, version=None):
         """
         Removes an object from Synapse.
 
         :param obj: An existing object stored on Synapse
                     such as Evaluation, File, Project, WikiPage etc
-                    
+
         :param version: For entities, specify a particular version to delete.
-        
+
         """
         # Handle all strings as the Entity ID for backward compatibility
         if isinstance(obj, six.string_types):
@@ -1327,14 +1337,17 @@ class Synapse:
 
         :returns: A dictionary
         """
-
         uri = '/entity/%s/annotations' % id_of(entity)
 
         annotations.update(kwargs)
         synapseAnnos = to_synapse_annotations(annotations)
         synapseAnnos['id'] = id_of(entity)
-        if 'etag' in entity and 'etag' not in synapseAnnos:
-            synapseAnnos['etag'] = entity['etag']
+        if 'etag' not in synapseAnnos:
+            if 'etag' in entity:
+                synapseAnnos['etag'] = entity['etag']
+            else:
+                old_annos = self.restGET(uri)
+                synapseAnnos['etag'] = old_annos['etag']
 
         return from_synapse_annotations(self.restPUT(uri, body=json.dumps(synapseAnnos)))
 
@@ -1415,7 +1428,7 @@ class Synapse:
             # Build the sub-query
             subqueryStr = "%s limit %d offset %d" % (queryStr, limit if limit < remaining else remaining, offset)
 
-            try: 
+            try:
                 response = self.restGET('/query?query=' + quote(subqueryStr))
                 for res in response['results']:
                     yield res
@@ -1757,7 +1770,7 @@ class Synapse:
         #The assumption is wrong - we always try to read either the outer or inner requests.get
         #but sometimes we don't have something to read.  I.e. when the type is ftp at which point
         #we still set the cache and filepath based on destination which is wrong because nothing was fetched
-        response = _with_retry(lambda: requests.get(url, headers=self._generateSignedHeaders(url), allow_redirects=False), **STANDARD_RETRY_PARAMS)
+        response = _with_retry(lambda: requests.get(url, headers=self._generateSignedHeaders(url), allow_redirects=False), verbose=self.debug, **STANDARD_RETRY_PARAMS)
 
         if response.status_code in [301,302,303,307,308]:
             url = response.headers['location']
@@ -1767,17 +1780,12 @@ class Synapse:
                 pathinfo = utils.file_url_to_path(url, verify_exists=True)
                 if 'path' not in pathinfo:
                     raise IOError("Could not download non-existent file (%s)." % url)
-                else:
-                    #TODO does this make sense why not just ignore the download and return.
-                    raise NotImplementedError('File can already be accessed.  '
-                                              'Consider setting downloadFile to False')
             elif scheme == 'sftp':
                 destination = self._sftpDownloadFile(url, destination)
                 return returnDict(destination)
             elif scheme == 'http' or scheme == 'https':
                 #TODO add support for username/password
                 response = requests.get(url, headers=self._generateSignedHeaders(url, {}), stream=True)
-
                 ## get filename from content-disposition, if we don't have it already
                 if os.path.isdir(destination):
                     filename = utils.extract_filename(
@@ -1797,12 +1805,17 @@ class Synapse:
             raise
 
         # Stream the file to disk
-        toBeTransferred = float(response.headers['content-length'])
+        if 'content-length' in response.headers:
+            toBeTransferred = float(response.headers['content-length'])
+        else:
+            toBeTransferred = -1
+        transferred = 0
         with open(destination, 'wb') as fd:
             for nChunks, chunk in enumerate(response.iter_content(FILE_BUFFER_SIZE)):
                 fd.write(chunk)
-                utils.printTransferProgress(nChunks*FILE_BUFFER_SIZE ,toBeTransferred, 'Downloading ', os.path.basename(destination))
-            utils.printTransferProgress(toBeTransferred ,toBeTransferred, 'Downloaded  ', os.path.basename(destination))
+                transferred += len(chunk)
+                utils.printTransferProgress(transferred, toBeTransferred, 'Downloading ', os.path.basename(destination))
+            utils.printTransferProgress(transferred, transferred, 'Downloaded  ', os.path.basename(destination))
         destination = os.path.abspath(destination)
         return returnDict(destination)
 
@@ -1912,7 +1925,9 @@ class Synapse:
                   containing externalURL and content-type
         """
         #If it is already an exteranal URL just return
-        if utils.is_url(entity['path']):
+        if local_state.get('externalURL', None):
+            return local_state['externalURL'], local_state
+        elif utils.is_url(entity['path']):
             local_state['externalURL'] = entity['path']
             #If the url is a local path compute the md5
             url = urlparse(entity['path'])
@@ -2128,7 +2143,7 @@ class Synapse:
             yield TeamMember(**result)
 
 
-    def submit(self, evaluation, entity, name=None, team=None, silent=False, submitterAlias=None):
+    def submit(self, evaluation, entity, name=None, team=None, silent=False, submitterAlias=None, teamName=None):
         """
         Submit an Entity for `evaluation <Evaluation.html>`_.
 
@@ -2137,6 +2152,7 @@ class Synapse:
         :param name:       A name for this submission
         :param team:       (optional) A :py:class:`Team` object or name of a Team that is registered for the challenge
         :param submitterAlias: (optional) A nickname, possibly for display in leaderboards in place of the submitter's name
+        :param teamName: (deprecated) A synonym for submitterAlias
 
         :returns: A :py:class:`synapseclient.evaluation.Submission` object
 
@@ -2231,6 +2247,8 @@ class Synapse:
             submission['contributors'] = contributors
         if submitterAlias:
             submission['submitterAlias'] = submitterAlias
+        elif teamName:
+            submission['submitterAlias'] = teamName
         elif team:
             submission['submitterAlias'] = team.name
 
@@ -2288,39 +2306,6 @@ class Synapse:
             evaluation = self.getEvaluation(id_of(evaluation))
 
         self.setPermissions(evaluation, userId, accessType=rights, overwrite=False)
-
-
-    def joinEvaluation(self, evaluation):
-        """
-        Adds the current user to an Evaluation.
-
-        :param evaluation: An Evaluation object or Evaluation ID
-
-        Example::
-
-            evaluation = syn.getEvaluation(12345)
-            syn.joinEvaluation(evaluation)
-
-        See: :py:mod:`synapseclient.evaluation`
-        """
-
-        self.restPOST('/evaluation/%s/participant' % id_of(evaluation), {})
-
-
-    def getParticipants(self, evaluation):
-        """
-        :param evaluation: Evaluation to get Participants from.
-
-        :returns: A generator over Participants (dictionary) for an Evaluation
-
-        See: :py:mod:`synapseclient.evaluation`
-        """
-
-        evaluation_id = id_of(evaluation)
-        url = "/evaluation/%s/participant" % evaluation_id
-
-        for result in self._GET_paginated(url):
-            yield result
 
 
     def getSubmissions(self, evaluation, status=None, myOwn=False, limit=100, offset=0):
@@ -2543,7 +2528,7 @@ class Synapse:
         except IOError as ex1:
             with open(fileInfo['path']) as f:
                 markdown = f.read().decode('utf-8')
-        
+
         wiki.markdown = markdown
         wiki.markdown_path = fileInfo['path']
 
@@ -2621,32 +2606,6 @@ class Synapse:
         file_handles = list(WikiAttachment(**fh) for fh in results['list'])
         return file_handles
 
-    def _copyWiki(self, wiki, destWiki):
-        """
-        Copy wiki contents including attachments from one wiki to another.
-
-        :param wiki: source :py:class:`synapseclient.wiki.Wiki`
-        :param destWiki: destination :py:class:`synapseclient.wiki.Wiki`
-
-        Both Wikis must already exist.
-        """
-        uri = "/entity/%s/wiki/%s/attachmenthandles" % (wiki.ownerId, wiki.id)
-        results = self.restGET(uri)
-
-        file_handles = {fh['id']:fh for fh in results['list']}
-
-        ## need to download an re-upload wiki attachments, ug!
-        attachments = []
-        tempdir = tempfile.gettempdir()
-        for fhid in wiki.attachmentFileHandleIds:
-            file_info = self._downloadWikiAttachment(wiki.ownerId, wiki, file_handles[fhid]['fileName'], destination=tempdir)
-            attachments.append(file_info['path'])
-
-        destWiki.update({'attachments':attachments, 'markdown':wiki.markdown, 'title':wiki.title})
-
-        return self._storeWiki(destWiki)
-
-         
     ############################################################
     ##                     Tables                             ##
     ############################################################
@@ -2998,7 +2957,7 @@ class Synapse:
         }
         # result is a http://rest.synapse.org/org/sagebionetworks/repo/model/table/TableFileHandleResults.html
         result = self.restPOST("/entity/%s/table/filehandles" % table_id, body=json.dumps(row_reference_set))
-        if len(result['rows'][0]['list']) != 1:
+        if len(result['rows'])==0 or len(result['rows'][0]['list']) != 1:
             raise SynapseError('Couldn\'t get file handle for tableId={id}, column={columnId}, row={rowId}, version={versionNumber}'.format(
                 id=table_id,
                 columnId=column_id,
@@ -3029,12 +2988,12 @@ class Synapse:
             return file_info
 
 
-    def downloadTableColumns(self, table, columns):
+    def downloadTableColumns(self, table, columns, **kwargs):
         """
         Bulk download of table-associated files.
 
         :param table:            table query result
-        :param column:           a list of column names as strings
+        :param columns:           a list of column names as strings
 
         :returns: a dictionary from file handle ID to path in the local file system.
 
@@ -3045,7 +3004,7 @@ class Synapse:
             import json
 
             results = syn.tableQuery('SELECT * FROM syn12345 LIMIT 100 OFFSET 100')
-            file_map = syn.downloadTableColumns(result, ['foo', 'bar'])
+            file_map = syn.downloadTableColumns(results, ['foo', 'bar'])
 
             for file_handle_id, path in file_map.items():
                 with open(path) as f:
@@ -3056,7 +3015,7 @@ class Synapse:
         FAILURE_CODES = ["NOT_FOUND", "UNAUTHORIZED", "DUPLICATE", "EXCEEDS_SIZE_LIMIT", "UNKNOWN_ERROR"]
         RETRIABLE_FAILURE_CODES = ["EXCEEDS_SIZE_LIMIT"]
         MAX_DOWNLOAD_TRIES = 100
-        MAX_FILES_PER_REQUEST = 2500
+        max_files_per_request = kwargs.get('max_files_per_request', 2500)
 
         def _is_integer(x):
             try:
@@ -3098,6 +3057,8 @@ class Synapse:
                             associateObjectType="TableEntity",
                             fileHandleId=file_handle_id,
                             associateObjectId=table.tableId))
+                else:
+                    warnings.warn("Weird file handle: %s" % file_handle_id)
 
         print("Downloading %d files, %d cached locally" % (len(file_handle_associations), len(file_handle_to_path_map)))
 
@@ -3107,7 +3068,7 @@ class Synapse:
         while len(file_handle_associations) > 0 and attempts < MAX_DOWNLOAD_TRIES:
             attempts += 1
 
-            file_handle_associations_batch = file_handle_associations[:MAX_FILES_PER_REQUEST]
+            file_handle_associations_batch = file_handle_associations[:max_files_per_request]
 
             ##------------------------------------------------------------
             ## call async service to build zip file
@@ -3313,7 +3274,7 @@ class Synapse:
         uri, headers = self._build_uri_and_headers(uri, endpoint, headers)
         retryPolicy = self._build_retry_policy(retryPolicy)
 
-        response = _with_retry(lambda: requests.get(uri, headers=headers, **kwargs), **retryPolicy)
+        response = _with_retry(lambda: requests.get(uri, headers=headers, **kwargs), verbose=self.debug, **retryPolicy)
         exceptions._raise_for_status(response, verbose=self.debug)
         return self._return_rest_body(response)
 
@@ -3333,7 +3294,7 @@ class Synapse:
         uri, headers = self._build_uri_and_headers(uri, endpoint, headers)
         retryPolicy = self._build_retry_policy(retryPolicy)
 
-        response = _with_retry(lambda: requests.post(uri, data=body, headers=headers, **kwargs), **retryPolicy)
+        response = _with_retry(lambda: requests.post(uri, data=body, headers=headers, **kwargs), verbose=self.debug, **retryPolicy)
         exceptions._raise_for_status(response, verbose=self.debug)
         return self._return_rest_body(response)
 
@@ -3354,7 +3315,8 @@ class Synapse:
         uri, headers = self._build_uri_and_headers(uri, endpoint, headers)
         retryPolicy = self._build_retry_policy(retryPolicy)
 
-        response = _with_retry(lambda: requests.put(uri, data=body, headers=headers, **kwargs), **retryPolicy)
+        response = _with_retry(lambda: requests.put(uri, data=body, headers=headers, **kwargs),
+                               verbose = self.debug, **retryPolicy)
         exceptions._raise_for_status(response, verbose=self.debug)
         return self._return_rest_body(response)
 
@@ -3372,7 +3334,8 @@ class Synapse:
         uri, headers = self._build_uri_and_headers(uri, endpoint, headers)
         retryPolicy = self._build_retry_policy(retryPolicy)
 
-        response = _with_retry(lambda: requests.delete(uri, headers=headers, **kwargs), **retryPolicy)
+        response = _with_retry(lambda: requests.delete(uri, headers=headers, **kwargs),
+                               verbose = self.debug, **retryPolicy)
         exceptions._raise_for_status(response, verbose=self.debug)
 
 
